@@ -1,0 +1,1218 @@
+---
+title: "EDC Randomization List: Cluster Randomized Trial"
+author: "Josh Betz (jbetz@jhu.edu) - Johns Hopkins Biostatistics Center"
+date: "`r Sys.time()`"
+output:
+  html_document:
+    toc: TRUE
+    toc_float: TRUE
+bibliography: "cluster_rct.bib"
+nocite: '@*'
+---
+
+```{r Load-Config-Check-Packages, eval = TRUE, echo = FALSE, message = FALSE}
+### User Parameters ############################################################
+config_file_name <- "config.yml"
+config_name <- "example"
+
+# List of .CSV files - Must contain variables with cluster ID and strata
+# Must be located in same directory as .Rmd file
+cluster_list_files <-
+  c("cluster_list_1.csv",
+    "cluster_list_2.csv",
+    "cluster_list_3.csv")
+
+
+# Need `here` and `config` to load configuration
+installed_packages <- installed.packages()[, "Package"]
+min_required_packages <- c("here", "config")
+if(!all(min_required_packages %in% installed_packages)){
+  stop(
+    "Required packages must be installed:",
+    paste0(
+      setdiff(x = min_required_packages, y = installed_packages), 
+      collapse = ", "
+    )
+  )
+}
+
+require(here)
+ 
+config_path <-
+  file.path(
+    here::here(), config_file_name
+  )
+ 
+if(file.exists(config_path)) {
+  design_config <-
+    config::get(
+      config = config_name,
+      file = config_path
+    )
+  
+  design_config_sha256 <-
+    digest::digest(
+      object = config_path,
+      algo = "sha256",
+      file = TRUE
+    )
+  
+  design_config_modtime <-
+    file.info(config_path)$mtime
+} else {
+  stop("Unable to load ", config_file_name, " from ", here::here())
+}
+
+required_packages <- design_config$cran_packages
+ 
+if(!all(required_packages %in% installed_packages)) {
+  stop(
+    "Required packages must be installed:",
+    paste0(
+      setdiff(x = required_packages, y = installed_packages),
+      collapse = ", ")
+  )
+}
+
+library(digest)
+library(dplyr)
+library(DT)
+library(htmltools)
+library(parallel)
+library(readr)
+library(rlang)
+library(stringr)
+library(tidyr)
+
+with(
+  data = 
+    design_config$opts_chunk,
+  expr = {
+    knitr::opts_chunk$set(
+      collapse = collapse,
+      echo = echo,
+      message = message,
+      error = error,
+      purl = purl,
+      results = results,
+      fig.path = fig_path,
+      fig.width = fig_width,
+      fig.height = fig_height,
+      fig.align = fig_align,
+      out.width = out_width,
+      dpi = dpi
+    )
+  }
+)
+```
+
+
+
+
+```{r Extract-Config-Variables}
+### Project Information ########################################################
+irb_number <-
+  design_config$administrative$irb_number
+clinicaltrialsgov_nct <-
+  design_config$administrative$clinicaltrialsgov_nct
+pi_name <-
+  design_config$administrative$pi_name
+pi_email <-
+  design_config$administrative$pi_email %>% 
+  paste0("[", ., "](mailto:", ., ")")
+statistician_name <-
+  design_config$administrative$statistician_name
+statistician_email <-
+  design_config$administrative$statistician_email %>% 
+  paste0("[", ., "](mailto:", ., ")")
+edc_pid <-
+  design_config$administrative$edc_pid
+
+### Cluster IDs, Treatment Variable ############################################
+participant_id_var <- design_config$participant_id_var
+cluster_id_var <- design_config$cluster_name_var
+cluster_size_var <- design_config$cluster_size_var
+clusters_total <- design_config$clusters_total
+cluster_tx_var <- design_config$cluster_tx_var
+rng_seed <- design_config$rng_parameters$rng_seed
+
+set.seed(
+  seed = rng_seed,
+  kind = "L'Ecuyer-CMRG"
+)
+
+random_seed <- .Random.seed
+
+if(!is.numeric(clusters_total)){
+  stop(
+    "`clusters_total` (", clusters_total, ") must be numeric."
+  )
+}
+
+
+
+
+### Stratified Randomization ###################################################
+is_stratified <-
+  design_config$stratified_randomization
+
+if(is_stratified){
+  strata_design <- design_config$strata
+  strata_design_vars <- names(strata_design)
+  
+   randomization_type <-
+    paste0(
+      "stratified by ",
+      paste(
+        paste0("`", strata_design_vars, "`"),
+        sapply(
+          X = strata_design,
+          FUN = function(x) 
+            paste0("(", paste(paste0("`", x, "`"), collapse = ", "), ")")
+        ),
+        collapse = "; "
+      )
+    )
+   
+} else{
+  strata_design_vars <- NULL
+  randomization_type <- "without stratification"
+}
+
+
+
+
+### Check for Invalid EDC Names ################################################
+edc_vars <-
+  c(cluster_id_var, cluster_tx_var, strata_design_vars)
+
+invalid_edc_names <-
+  stringr::str_detect(
+    string = edc_vars,
+    pattern = "[^A-Za-z1-9_]"
+  )
+
+if(any(invalid_edc_names)){
+  stop(
+    "Variable names not edc compatible: `",
+    paste0(edc_vars[which(invalid_edc_names)], collapse = "`, `"), "`"
+  )
+}
+
+
+
+
+### Treatment Labels, Block Sizes ##############################################
+tx_labels <- design_config$tx_labels
+tx_copies_per_block <- design_config$tx_copies_per_block
+
+if(!is.numeric(tx_copies_per_block)){
+  stop("`tx_copies_per_block` must be numeric")
+}
+
+n_treatments <- length(tx_labels)
+
+
+
+
+### File Name Prefixes #########################################################
+file_name_prefix <- design_config$file_name_prefix
+
+invalid_file_prefix <-
+  stringr::str_detect(
+    string = file_name_prefix,
+    pattern = "[^A-Za-z1-9_]"
+  )
+
+if(invalid_file_prefix){
+  stop("`", file_name_prefix, "` is an invalid file prefix: it must conatin ",
+       "only letters, numbers, and underscores.")
+}
+
+block_size_description <-
+  xfun::join_words(
+    words = n_treatments*tx_copies_per_block,
+    and = " or "
+  )
+
+randomization_type <-
+  paste(
+    paste(rep(x = 1, times = n_treatments), collapse = ":"),
+    "randomization",
+    randomization_type
+  )
+
+treatment_labels <-
+  paste(paste0("`", tx_labels, "`"), collapse = ", ")
+
+inline_config_name <- paste0("`", config_name,"`")
+inline_id_var <- paste0("`", cluster_id_var, "`")
+inline_tx_var <- paste0("`", cluster_tx_var, "`")
+inline_size_var <- paste0("`", cluster_size_var, "`")
+```
+
+
+**NOTE:** Cluster randomized trials require special ethical, statistical, and administrative challenges: See the [references](#references) section for a brief overview of the literature. Choice of a cluster RCT design should be based on considerations of ethics, efficiency, and the research question to be evaluated. Researchers should familiarize themselves with the evolving literature on the design, monitoring, analysis, and reporting of cluster RCTs prior to planning such a study.
+
+
+
+
+## Study Information
+
+Study administration was loaded from the `r inline_config_name` configuration in `r config_file_name`.
+
+  - Configuration: `r config_file_name`
+    - Modified: `r design_config_sha256`
+    - SHA256 `r design_config_modtime`
+
+information is listed below.
+
+  - IRB Number: `r irb_number`
+  - ClinicalTrials.gov Registration: `r clinicaltrialsgov_nct`
+  - PI Name: `r pi_name` (`r pi_email`)
+  - Statistician Name: `r statistician_name` (`r statistician_email`)
+  - EDC PID: `r edc_pid`
+
+
+
+
+### Specification of Randomization:
+
+Pseudorandom number generation is performed using L'Ecuyer's CMRG. Each
+randomization list is created using a separate random number stream.
+Randomization lists are created by permuted block randomization with random
+block sizes.
+
+  - Randomization: `r randomization_type`
+    - Treatment Labels: `r treatment_labels`
+    - Block sizes: `r block_size_description`
+    - Maximum Number of Clusters per Stratum: `r clusters_total`
+    - Cluster Identifier in EDC: `r inline_id_var`
+    - Treatment Variable Name: `r inline_tx_var`
+    - RNG Seed: `r rng_seed`
+
+Lists of sites will have a variable `r inline_size_var`
+indicating the maximum number of participants at that cluster.
+
+
+```{r Check-Lists-Exist}
+cluster_lists <- list()
+
+current_list_number <-
+  length(cluster_list_files)
+
+cluster_list_file_metadata <-
+  data.frame(
+    file = as.character(rep(x = NA, times = current_list_number)),
+    sha256 = as.character(rep(x = NA, times = current_list_number)),
+    modified = as.POSIXct(rep(x = NA, times = current_list_number))
+  )
+
+if(any(!file.exists(cluster_list_files))){
+  missing_files <-
+    cluster_list_files[which(!file.exists(cluster_list_files))]
+  stop(
+    "Files not found: ", paste0(missing_files, collapse = ", ")
+  )
+}
+
+for(i in 1:current_list_number) {
+  # Store information about each list
+  cluster_list_file_metadata$file[i] <- cluster_list_files[i]
+  cluster_list_file_metadata$sha256[i] <-
+    digest::digest(
+      object = cluster_list_files[i],
+      algo = "sha256",
+      file = TRUE
+    )
+  cluster_list_file_metadata$modified[i] <-
+    file.info(cluster_list_files[i])$mtime
+
+  cluster_lists[[i]] <-
+    readr::read_csv(
+      file = cluster_list_files[i],
+    ) %>%
+    dplyr::mutate(
+      .cluster_list = i,
+      .latest_cluster_list = (i == current_list_number)
+    )
+}
+```
+
+
+
+
+```{r Load-Previous-Output}
+rdata_file_name <-
+  paste0(file_name_prefix, "_randomization_data_",
+         current_list_number, ".Rdata")
+
+# Check for previous output: Load most recent result.
+if(current_list_number > 1){
+  previous_rdata_files <-
+    paste0(file_name_prefix, "_randomization_data_",
+           1:(current_list_number - 1), ".Rdata")
+
+  if(!all(file.exists(previous_rdata_files))){
+    missing_rdata_files <-
+      previous_rdata_files[which(!file.exists(previous_rdata_files))]
+    stop(
+      "Multiple lists should only be supplied when updating previous output. ",
+      "Previous output files were not found: ",
+      paste0(missing_rdata_files, collapse = ", ")
+    )
+  }
+
+  # Load previous result into new environment:
+  temp_environment <- new.env()
+  
+  most_recent_rdata_file <- tail(x = previous_rdata_files, n = 1)
+  most_recent_rdata_path <-
+    file.path(here::here(), most_recent_rdata_file)
+
+  load(
+    file = most_recent_rdata_path,
+    envir = temp_environment
+  )
+  
+  rdata_sha256 <-
+    digest::digest(
+      object = most_recent_rdata_path,
+      algo = "sha256",
+      file = TRUE
+    )
+  
+  rdata_modtime <-
+    file.info(most_recent_rdata_path)$mtime
+
+  import_objects <-
+    c(
+      "design_config",
+      "participant_id_var",
+      "all_cluster_lists",
+      "all_edc_lists",
+      "cluster_list_file_metadata",
+      "randomization_list",
+      "lists_generated"
+    )
+
+  for(i in 1:length(import_objects)){
+    assign(
+      x = paste0(import_objects[i], "_previous"),
+      value =
+        get(
+          x = import_objects[i],
+          envir = temp_environment
+        )
+    )
+  }
+  
+  previous_data_description <-
+    paste0(
+      "A randomization list with ", nrow(randomization_list_previous), " rows ",
+      "with ", sum(randomization_list_previous$.assigned), " previously ",
+      "assigned units."
+    )
+} else {
+  previous_data_description <- "No previous lists have been supplied."
+  most_recent_rdata_file <- 
+    rdata_sha256 <-
+    rdata_modtime <- ""
+}
+```
+
+
+
+  - Previous Data: `r previous_data_description`
+    - File: `r most_recent_rdata_file`
+    - SHA256: `r rdata_sha256`
+    - Modified: `r rdata_modtime`
+
+
+
+--------------------------------------------------------------------------------
+
+## Lists of Clusters to Randomize {.tabset}
+
+```{r Print-Metadata}
+cluster_list_file_metadata %>% 
+  kableExtra::kbl(.) %>%
+  kableExtra::kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed")
+  )
+```
+
+
+
+```{r Print-List}
+for(i in 1:current_list_number){
+  cat("\n### List", i, "\n\n")
+  
+  cluster_lists[[i]] %>% 
+    kableExtra::kbl(.) %>%
+    kableExtra::kable_styling(
+      bootstrap_options = c("striped", "hover", "condensed")
+    ) %>%
+    # DT::datatable(
+    #   data = .,
+    #   extensions = 'Buttons',
+    #   options = 
+    #     list(
+    #       dom = 'Blfrtip',
+    #       buttons = c('copy', 'csv', 'excel', 'pdf'),
+    #       lengthMenu =
+    #         list(
+    #           c(10,25,50,-1),
+    #           c(10,25,50,"All")
+    #         )
+    #       )
+    # ) %>% 
+    # htmltools::tagList() %>% 
+    print()
+  
+  cat("\n\n")
+}
+```
+
+
+```{r Check-All-Lists}
+for(i in 1:length(cluster_list_files)) {
+  cluster_list_i <- cluster_lists[[i]]
+  cluster_list_i_cols <- names(cluster_list_i)
+
+  # Check for Expected Variables
+  if(!cluster_id_var %in% cluster_list_i_cols){
+    stop(
+      cluster_list_files[i], " - Cluster ID variable `", cluster_id_var,
+      "` not found in data"
+    )
+  } else if(!cluster_size_var %in% cluster_list_i_cols){
+    stop(
+      cluster_list_files[i], " - Cluster size variable `", cluster_size_var,
+      "` not found in data"
+    )
+  } else if(is_stratified){
+    # If stratified, check for strata variables
+    if(!all(strata_design_vars %in% cluster_list_i_cols)){
+      missing_vars <-
+        setdiff(
+          x = strata_design_vars,
+          y = cluster_list_i_cols
+        )
+      stop(
+        cluster_list_files[i], " - Strata variables `",
+        paste0(missing_vars, collapse = "`, `"), "` not found in data"
+      )
+    }
+
+    # Check for unexpected values of stratification factors
+    for(j in strata_design_vars){
+      observed_strata <-
+        dplyr::pull(.data = cluster_list_i, var = j) %>%
+        unique
+      expected_strata <- strata_design[[j]]
+
+      unexpected_strata <-
+        setdiff(
+          x = observed_strata,
+          y = expected_strata
+        )
+
+      if(length(unexpected_strata) > 0){
+        stop(
+          cluster_list_files[i], " - Unexpected values found in stratum `",
+          strata_vars[j], "`: `", paste0(unexpected_strata, collapse = "`, `"),
+          "`"
+        )
+      }
+    }
+  }
+
+  cluster_names <-
+    dplyr::pull(.data = cluster_list_i, var = cluster_id_var)
+
+  # Check for invalid ids: null strings, missing values, duplicates
+  if(any(cluster_names %in% c("", NA))){
+    stop(
+      cluster_list_files[i], " - Invalid cluster IDs in rows: ",
+      paste0(which(cluster_names %in% c("", NA)), collapse = ", ")
+    )
+  } else if(any(duplicated(cluster_names))){
+    stop(
+      cluster_list_files[i], " - Duplicated cluster IDs in rows: ",
+      which(duplicated(cluster_names))
+    )
+  }
+
+  cluster_sizes <-
+    dplyr::pull(.data = cluster_list_i, var = cluster_size_var)
+
+  # Check that cluster sizes are not missing, are numeric
+  if(!is.numeric(cluster_sizes)){
+    stop(
+      cluster_list_files[i], " - Non-numeric values in cluster size variable `",
+      cluster_size_var, "`"
+    )
+  } else if(any(is.na(cluster_sizes))){
+    stop(
+      cluster_list_files[i], " - Invalid cluster sizes rows: ",
+      paste0(which(is.na(cluster_sizes)), collapse = ", ")
+    )
+  }
+}
+```
+
+
+
+
+```{r Concatenate-Lists}
+## What about list 1 has cluster in one strata, list 2 has cluster in another?
+all_cluster_lists <-
+  do.call(
+    what = dplyr::bind_rows,
+    args = cluster_lists
+  )
+
+repeat_clusters <-
+  all_cluster_lists %>%
+  dplyr::count(!!sym(cluster_id_var)) %>%
+  dplyr::filter(n > 1) %>%
+  dplyr::pull(!!sym(cluster_id_var))
+
+# Check for consistency: Cluster listed multiple times with different strata
+cluster_strata_check <-
+  all_cluster_lists %>%
+  dplyr::group_by(
+    dplyr::across(
+      dplyr::all_of(
+        x = c(cluster_id_var, strata_design_vars)
+      )
+    )
+  ) %>%
+  dplyr::count() %>%
+  dplyr::ungroup() %>%
+  dplyr::count(!!sym(cluster_id_var)) %>%
+  dplyr::filter(n > 1)
+
+if(nrow(cluster_strata_check) > 0){
+  stop(
+    "Inconsistent strata for one or more clusters. See `cluster_strata_check`"
+  )
+}
+
+all_cluster_lists <-
+  all_cluster_lists %>%
+  dplyr::group_by(
+    dplyr::across(
+      dplyr::all_of(
+        x = c(cluster_id_var)
+      )
+    )
+  ) %>%
+  dplyr::mutate(
+    `.expand` =
+      (dplyr::row_number() > 1)
+  ) %>%
+  dplyr::ungroup()
+
+
+### Get Clusters to Expand #####################################################
+clusters_to_expand <-
+  all_cluster_lists %>%
+  dplyr::filter(
+    `.latest_cluster_list`,
+    `.expand`
+  ) %>%
+  dplyr::pull(
+    !!sym(cluster_id_var)
+  )
+
+
+### Assign Row Number in Stratum-Specific Randomization List ###################
+if(is_stratified){
+  all_cluster_lists <-
+    all_cluster_lists %>%
+    dplyr::group_by(
+      dplyr::across(
+        .col = dplyr::all_of(strata_design_vars)
+      )
+    )
+}
+
+
+all_cluster_lists <-
+  all_cluster_lists %>%
+  dplyr::filter(
+    `.expand` %in% FALSE
+  ) %>%
+  dplyr::mutate(
+    .cluster_in_stratum = dplyr::row_number()
+  ) %>%
+  dplyr::ungroup()
+
+
+clusters_all_names <-
+  dplyr::pull(.data = all_cluster_lists, var = cluster_id_var) %>%
+  unique
+
+clusters_all_n <- length(clusters_all_names)
+
+
+### Count Number in Each Stratum: Current List vs. Previous ####################
+clusters_by_strata_n <-
+  all_cluster_lists %>%
+  dplyr::group_by(
+    dplyr::across(
+      .cols = dplyr::all_of(x = c(".latest_cluster_list", strata_design_vars))
+    )
+  ) %>%
+  dplyr::count() %>%
+  dplyr::ungroup()
+```
+
+
+
+
+```{r Check-Previous-Output}
+if(current_list_number > 1){
+  # Check for Consistency with Previous Results
+  if(
+    !identical(
+      x = head(x = cluster_list_file_metadata, -1),
+      y = cluster_list_file_metadata_previous
+    )
+  ){
+    stop("File list has changed from previous run. Check chunk",
+         "`Check-Previous-Output` for more information.")
+  }
+
+  if(!identical(x = design_config, y = design_config_previous)){
+    stop("Configuration file `", config_file_name,
+         "` has changed from previous run.")
+  }
+
+  if(
+    !identical(
+      x =
+      all_cluster_lists %>%
+      dplyr::filter(
+        `.latest_cluster_list` == FALSE
+      ) %>%
+      dplyr::select(
+        dplyr::all_of(
+          x = c(cluster_id_var, strata_design_vars, cluster_size_var)
+        )
+      ),
+      y =
+      all_cluster_lists_previous %>%
+      dplyr::select(
+        dplyr::all_of(
+          x = c(cluster_id_var, strata_design_vars, cluster_size_var)
+        )
+      )
+    )
+  ){
+    stop("List of clusters `all_cluster_lists` has changed from previous run.")
+  }
+}
+```
+
+
+
+
+```{r Create-Randomization-List}
+if(current_list_number > 1){
+  list_size_check <-
+    dplyr::full_join(
+      x =
+        randomization_list_previous %>%
+        dplyr::filter(
+          `.assigned` == FALSE
+        ) %>%
+        dplyr::group_by(
+          dplyr::across(
+            .cols = dplyr::all_of(x = strata_design_vars)
+          )
+        ) %>%
+        dplyr::count(name = "n_available") %>%
+        dplyr::ungroup(),
+      y =
+        clusters_by_strata_n %>%
+        dplyr::filter(
+          `.latest_cluster_list` %in% TRUE
+        ) %>%
+        dplyr::rename(
+          n_required = n
+        ),
+      by = c(strata_design_vars)
+    )
+
+  create_new_list <-
+    with(data = list_size_check, expr = {any(n_required > n_available)})
+
+  lists_generated <- lists_generated_previous
+  
+  all_edc_lists <- all_edc_lists_previous
+
+} else if(current_list_number == 1){
+  create_new_list <- TRUE
+
+  if(any(clusters_by_strata_n$n > clusters_total)){
+    stop(
+      "Randomization list contains more cluster IDs (",
+      max(clusters_by_strata_n$n), ") than specified in the initial ",
+      "configuration file (", clusters_total, ")"
+    )
+  }
+
+  lists_generated <- 0
+  all_edc_lists <- list()
+}
+
+if(create_new_list){
+
+  lists_generated <- lists_generated + 1
+
+  # Set a new RNG stream for each list generated
+  for(i in 1:lists_generated){
+    parallel::nextRNGStream(seed = random_seed)
+  }
+
+  if(is_stratified){
+    strata_levels <-
+      do.call(
+        what = tidyr::expand_grid,
+        args = design_config$strata
+      ) %>%
+      dplyr::mutate(
+        .stratum = dplyr::row_number()
+      )
+  } else {
+    strata_levels <-
+      dplyr::tibble(
+        .stratum = 1
+      )
+  }
+
+  strata_levels_n <- nrow(strata_levels)
+
+  blocks_initial_n <-
+    ceiling(clusters_total/(min(tx_copies_per_block)*n_treatments))
+
+  # Random treatment copies per block
+  blocks_copies <-
+    sample(x = tx_copies_per_block, size = blocks_initial_n, replace = TRUE)
+
+  randomization_list <- list()
+
+  for(i in 1:strata_levels_n){
+    # Copy list of treatments to get block size, then permute
+    tx_list <-
+      sapply(
+        X = blocks_copies,
+        FUN = function(x, labels = tx_labels)
+          sample(x = rep(tx_labels, each = x), replace = FALSE)
+      ) %>%
+      do.call(
+        what = c,
+        args = .
+      )
+    randomization_list[[i]] <-
+      data.frame(
+        strata_levels[i,],
+        `.cluster_in_stratum` =
+          1:length(tx_list)
+      ) %>%
+      dplyr::mutate(
+        !!cluster_tx_var := tx_list,
+        .assigned = FALSE,
+        .randomization_list = lists_generated
+      )
+  }
+
+  randomization_list <-
+    do.call(
+      what = dplyr::bind_rows,
+      args = randomization_list
+    ) 
+
+  # Append to previous list
+  if(lists_generated > 1){
+    randomization_list <-
+      dplyr::bind_rows(
+        randomization_list_previous %>% 
+          dplyr::mutate(
+            `.previous_totals` = `.cluster_in_stratum`
+          ) %>% 
+          dplyr::mutate(
+            .latest_cluster_list =
+              dplyr::case_when(
+                .latest_cluster_list %in% TRUE ~ FALSE,
+              )
+          ),
+        randomization_list,
+      ) %>%
+      dplyr::arrange(
+        `.stratum`
+      ) %>% 
+      tidyr::fill(
+        `.previous_totals`, 
+        .direction = "down"
+      ) %>% 
+      dplyr::mutate(
+        `.cluster_in_stratum` =
+          dplyr::case_when(
+            .randomization_list == lists_generated ~
+              `.previous_totals` + `.cluster_in_stratum`,
+            .randomization_list < lists_generated ~
+              `.cluster_in_stratum`
+          ),
+        `.previous_totals` = NULL,
+        `.expand` = !!sym(cluster_id_var) %in% clusters_to_expand
+      )
+  }
+}
+```
+
+
+
+
+```{r Assign-Treatment}
+check_unmatched <-
+  dplyr::anti_join(
+    x =
+      all_cluster_lists %>%
+      dplyr::filter(
+        .latest_cluster_list == TRUE
+      ),
+    y = randomization_list,
+    by = c(strata_design_vars, ".cluster_in_stratum")
+  )
+
+if(nrow(check_unmatched)){
+  stop(
+    "Clusters unmatched against randomization list - cluster IDs: `",
+    paste0(
+      dplyr::pull(.data = check_unmatched, var = cluster_id_var),
+      collapse = "`, `"
+    ), ". See chunk labelled `Assign-Treatment`."
+  )
+}
+
+
+
+
+if(current_list_number == 1){
+  randomization_list <-
+    dplyr::left_join(
+      x = randomization_list,
+      y =
+        all_cluster_lists %>%
+        dplyr::filter(
+          .latest_cluster_list == TRUE
+        ),
+      by = c(strata_design_vars, ".cluster_in_stratum")
+    )
+} else {
+
+  clusters_to_assign <-
+    dplyr::anti_join(
+      x =
+        all_cluster_lists %>%
+        dplyr::filter(
+          .latest_cluster_list %in% TRUE
+        ),
+      y =
+        all_cluster_lists %>%
+        dplyr::filter(
+          .latest_cluster_list %in% FALSE
+        ) %>%
+        dplyr::select(
+          dplyr::all_of(
+            x = c(cluster_id_var)
+          )
+        ),
+      by = c(cluster_id_var)
+    )
+
+  randomization_list_new <-
+    dplyr::bind_rows(
+      # Append Old List
+      randomization_list %>%
+        dplyr::filter(
+          `.assigned` %in% TRUE
+        ),
+
+      # Add Newly Assigned Clusters
+      dplyr::inner_join(
+        x =
+          randomization_list %>%
+          dplyr::filter(
+            `.assigned` %in% FALSE
+          ) %>%
+          dplyr::select(
+            dplyr::all_of(
+              x = c(strata_design_vars, ".stratum", ".cluster_in_stratum",
+                    cluster_tx_var, ".assigned", ".randomization_list")
+            )
+          ) %>%
+          dplyr::mutate(
+            `.assigned` = TRUE
+          ),
+        y = clusters_to_assign,
+        by = c(strata_design_vars, ".cluster_in_stratum")
+      ),
+
+      dplyr::anti_join(
+        x = randomization_list,
+        y =
+          all_cluster_lists %>%
+          dplyr::select(
+            dplyr::all_of(
+              x = c(strata_design_vars, ".cluster_in_stratum")
+            )
+          ),
+        by = c(strata_design_vars, ".cluster_in_stratum")
+      )
+    ) %>%
+    dplyr::arrange(
+      `.stratum`, `.cluster_in_stratum`
+    ) %>%
+    dplyr::mutate(
+      .latest_cluster_list =
+        (.cluster_list == lists_generated) & .assigned
+    )
+
+  randomization_list_check <-
+    dplyr::anti_join(
+      x =
+        randomization_list %>%
+        dplyr::select(
+          dplyr::all_of(
+            x = c(strata_design_vars, ".stratum", ".cluster_in_stratum",
+                  cluster_tx_var)
+          )
+        ),
+      y =
+        randomization_list_new %>%
+        dplyr::select(
+          dplyr::all_of(
+            x = c(strata_design_vars, ".stratum", ".cluster_in_stratum",
+                  cluster_tx_var)
+          )
+        ),
+      by = c(strata_design_vars, ".stratum", ".cluster_in_stratum",
+             cluster_tx_var)
+    )
+
+  if(nrow(randomization_list_check) == 0){
+    randomization_list <- randomization_list_new
+  } else {
+    stop("An error occurred in chunk `Assign-Treatment`")
+  }
+}
+```
+
+
+
+
+--------------------------------------------------------------------------------
+
+
+## Randomization List
+
+```{r Print-Randomization-List}
+randomization_list %>% 
+  kableExtra::kbl(
+    x = .,
+    caption =
+      paste0(
+        "All randomization lists, concatenated together. Clusters randomized ",
+        "from the current list are in **bold font,** while clusters expanded ",
+        "(i.e. have additional participant IDs created) are in *italics* with ",
+        "red font."
+      )
+  ) %>%
+  kableExtra::kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed")
+  ) %>% 
+  kableExtra::row_spec(
+    row = which(randomization_list$.latest_cluster_list),
+    bold = TRUE
+  ) %>% 
+  kableExtra::row_spec(
+    row = which(randomization_list$.expand),
+    color = "red",
+    italic = TRUE
+  )
+```
+
+
+
+
+```{r Generate-edc-List}
+edc_list <-
+  randomization_list %>%
+  dplyr::filter(
+    `.latest_cluster_list` | .expand
+  ) %>%
+  dplyr::select(
+    dplyr::all_of(
+      x = c(cluster_id_var, strata_design_vars,
+            cluster_tx_var, cluster_size_var)
+    )
+  ) %>%
+  dplyr::group_by(
+    dplyr::across(
+      .cols = dplyr::all_of(x = c(cluster_id_var))
+    )
+  ) %>%
+  dplyr::mutate(
+    .row = paste0(1:cluster_n, collapse = "|")
+  ) %>%
+  dplyr::ungroup() %>%
+  tidyr::separate_longer_delim(
+    cols = `.row`,
+    delim = "|"
+  ) %>%
+  dplyr::select(
+    !dplyr::all_of(x = c(cluster_size_var, ".row"))
+  )
+
+# Mark assigned strata
+randomization_list$`.assigned`[
+  with(
+    data = randomization_list,
+    expr = which(`.latest_cluster_list`)
+  )
+] <- TRUE
+
+all_edc_lists[[current_list_number]] <-
+  edc_list
+```
+
+
+```{r Save-Results}
+edc_csv_file_name <-
+  paste0(file_name_prefix, "_edc_list_", current_list_number, ".csv")
+
+edc_csv_file_path <-
+  file.path(here::here(), edc_csv_file_name)
+
+if(file.exists(edc_csv_file_path)){
+  stop(
+    "File `", edc_csv_file_name, "` exists. This program will not ",
+    "overwrite existing files."
+  )
+} else {
+  write.csv(
+    x = edc_list,
+    file = edc_csv_file_path,
+    row.names = FALSE
+  )
+  
+  edc_csv_sha256 <-
+    digest::digest(
+      object = edc_csv_file_path,
+      algo = "sha256",
+      file = TRUE
+    )
+}
+
+
+tx_list_file_name <-
+  paste0(
+    file_name_prefix, "_treatment_assignment_", current_list_number, ".csv"
+  )
+
+tx_list_file_path <-
+  file.path(here::here(), tx_list_file_name)
+
+if(file.exists(tx_list_file_path)){
+  stop(
+    "File `", tx_list_file_name, "` exists. This program will not ",
+    "overwrite existing files."
+  )
+} else {
+  write.csv(
+    x = randomization_list,
+    file = tx_list_file_path,
+    row.names = FALSE
+  )
+  
+  tx_list_sha256 <-
+    digest::digest(
+      object = tx_list_file_path,
+      algo = "sha256",
+      file = TRUE
+    )
+}
+
+
+rdata_file_name <-
+  paste0(file_name_prefix, "_randomization_data_",
+         current_list_number, ".Rdata")
+
+rdata_file_path <-
+  file.path(here::here(), rdata_file_name)
+
+if(file.exists(rdata_file_path)){
+  stop(
+    "File `", rdata_file_path, "` exists. This program will not ",
+    "overwrite existing files."
+  )
+} else {
+  save(
+    list =
+      c(
+        "design_config",
+        "participant_id_var",
+        "cluster_id_var",
+        "strata_design_vars",
+        "cluster_size_var",
+        "clusters_total",
+        "cluster_tx_var",
+        "all_cluster_lists",
+        "cluster_list_file_metadata",
+        "all_edc_lists",
+        "strata_levels",
+        "randomization_list",
+        "lists_generated"
+      ),
+    file = rdata_file_path
+  )
+}
+
+rdata_sha256 <-
+  digest::digest(
+    object = rdata_file_path,
+    algo = "sha256",
+    file = TRUE
+  )
+```
+
+
+
+
+--------------------------------------------------------------------------------
+
+
+## Results Files
+
+  - Cluster-Level Treatment Assignment:
+    - File: `r tx_list_file_name`
+    - SHA256: `r tx_list_sha256`
+  - Individual-Level Randomization Codes:
+    - File: `r edc_csv_file_name`
+    - SHA256: `r edc_csv_sha256`
+  - Rdata - All Randomization Data:
+    - File: `r rdata_file_name`
+    - SHA256: `r rdata_sha256`
+
+
+
+
+--------------------------------------------------------------------------------
+
+
+## References:

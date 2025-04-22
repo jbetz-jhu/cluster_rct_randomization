@@ -1,0 +1,102 @@
+default:
+  rng_parameters:
+    rng_seed: 12345
+  
+  opts_chunk:
+    collapse: TRUE
+    echo: FALSE
+    message: FALSE
+    error: TRUE
+    purl: FALSE
+    results: "asis"
+    fig_path: "figures"
+    fig_width: 12
+    fig_height: 12
+    fig_align: "center"
+    out_width: "80%"
+    dpi: 300
+  
+  cran_packages:
+    - "devtools"
+    - "DT"
+    - "digest"
+    - "dplyr"
+    - "here"
+    - "htmltools"
+    - "kableExtra"
+    - "parallel"
+    - "readr"
+    - "rlang"
+    - "stringr"
+    - "tidyr"
+    - "xfun"
+
+example: 
+  administrative:
+    irb_number: 12345
+    clinicaltrialsgov_nct: "nct_00000000"
+    pi_name: "Example PI, Ph.D"
+    pi_email: "example.pi@institution.edu"
+    statistician_name: "Example Statistician, M.S."
+    statistician_email: "example.statistician@institution.edu"
+    # EDC project ID, if applicable - e.g. REDCap Project ID
+    edc_pid: 12345
+  # Study name acronym in snake case - Used to label files
+  file_name_prefix: "example_crt"
+  # Column in EDC indicating individual-level identifier
+  participant_id_var: "record_id"
+  # Column in EDC indicating the cluster-level identifier
+  cluster_name_var: "cluster_name"
+  # Column in cluster lists containing the maximum participants per cluster
+  cluster_size_var: "cluster_n"
+  # Number of clusters to be randomized
+  clusters_total: 7
+  # Name of treatment assignment variable to be created
+  cluster_tx_var: "cluster_tx"
+  tx_labels:
+    - "treatment"
+    - "control"
+  tx_copies_per_block:
+    - 1
+    - 2
+    - 3
+  stratified_randomization: TRUE
+  strata:
+    stratum_1:
+      - "A"
+      - "B"
+    stratum_2:
+      - "C"
+      - "D"
+
+### ENTER YOUR STUDY'S INFORMATION HERE: NAME SHOULD BE SNAKE CASE #############
+your_study: # Rename this: use snake_case - replace `config_name` in .Rmd
+  administrative:
+    irb_number: 12345
+    clinicaltrialsgov_nct: "nct_00000000"
+    pi_name: "Example PI, Ph.D"
+    pi_email: "example.pi@institution.edu"
+    statistician_name: "Example Statistician, M.S."
+    statistician_email: "example.statistician@institution.edu"
+    # EDC project ID, if applicable - e.g. REDCap Project ID
+    edc_pid: 12345 
+  # Study name acronym in snake case - Used to label files
+  file_name_prefix: "example_crt"
+  # Column in EDC indicating individual-level identifier
+  participant_id_var: "record_id"
+  # Column in EDC indicating the cluster-level identifier
+  cluster_name_var: "cluster_name"
+  # Column in cluster lists containing the maximum participants per cluster
+  cluster_size_var: "cluster_n"
+  # Number of clusters to be randomized
+  clusters_total: 100
+  # Name of treatment assignment variable to be created
+  cluster_tx_var: "cluster_tx"
+  tx_labels:
+    - "treatment"
+    - "control"
+  tx_copies_per_block:
+    - 1
+    - 2
+    - 3
+  stratified_randomization: FALSE

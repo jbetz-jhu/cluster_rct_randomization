@@ -1,2 +1,278 @@
-# cluster_rct_randomization
-Generating individual-level treatment codes for cluster randomized trials.
+Generating Randomization and Treatment Lists for Cluster Randomized
+Trials
+================
+Josh Betz (<jbetz@jhu.edu>) - Johns Hopkins Biostatistics Center
+2025-04-21
+
+- [How to Use This Repository](#how-to-use-this-repository)
+- [References](#references)
+
+<!-- This is created by README.Rmd -->
+
+This repository contains .Rmd reports for generating randomization lists
+for cluster randomized trials. While it is straightforward to produce a
+randomization list for a cluster randomized trial, it is not always
+trivial to link the cluster-level treatment assignment to individuals in
+those clusters within the [Electronic Data Capture (EDC)
+system](https://en.wikipedia.org/wiki/Electronic_data_capture).
+
+In an EDC system that (1) allows the use of user-created randomization
+lists and (2) supports stratified randomization (such as
+[REDCap](https://projectredcap.org/)), one solution is to “trick” the
+EDC into treating the clusters as strata in a design with stratified
+randomization. Rather than having treatment randomly assigned within
+strata, each cluster’s stratum contains only treatment allocations
+matching the cluster’s treatment assignment. This workflow produces such
+a list that can be uploaded to an EDC, facilitating this approach.
+
+Another solution involves downloading a list of each participant and
+their corresponding cluster, merging this with the site level treatment
+assignment, then uploading this merged list to the EDC. This workflow
+also produces site-level randomization lists. One drawback is that this
+process may need to be done several times over the course of the study
+as participants are enrolled.
+
+Other solutions may be possible, such as fields that use SQL joins:
+before designing a cluster randomized trial, consult the administators
+of your EDC to determine the best way to carry out such a study.
+
+**This software should be used by a methodologically-trained trialist or
+statistician. Randomized trials should have ongoing statistical
+oversight to ensure ethical conduct and scientific validity.**
+
+## How to Use This Repository
+
+#### Make Sure a Cluster Randomized Trial is Appropriate
+
+In an individually randomized trial, treatment is assigned at the level
+of the individual. In contrast, cluster randomized trials involve
+randomly allocating treatment to groups of individuals, known as
+clusters. **Cluster randomized trials require special ethical,
+statistical, and administrative considerations: See the
+[references](#references) section for a brief overview of the
+literature.** Choice of a cluster RCT design should be based on
+considerations of ethics, efficiency, and the research question to be
+evaluated. Researchers should familiarize themselves with the evolving
+literature on the design, monitoring, analysis, and reporting of cluster
+RCTs prior to planning such a study.
+
+#### 1. Clone the Repository
+
+It is easiest to use this repository with
+[R](https://cran.r-project.org/) and [R
+Studio](https://posit.co/download/rstudio-desktop/). Install and update
+these programs as needed. Update installed packages as needed.
+
+In R Studio, go to `File` \> `New Project` \> `Version Control` \>
+`Git`: in the Repository URL field, put
+`https://github.com/jbetz-jhu/cluster_rct_randomization`: choose the
+subdirectory for the project, and rename the project as you see fit.
+Click `Create Project` to clone the software from the repository.
+
+#### 2. Install Additional Packages
+
+Next, open `config.yml` in R Studio: this is a configuration file meant
+to work with the [`config` package in
+R](https://cran.r-project.org/web/packages/config/index.html). In this
+file, you’ll see a list called `cran_packages` - these are packages that
+must be downloaded from the [Comprehensive R Archival
+Network](https://cran.r-project.org/). These can be done using the
+`Packages` tab in R Studio, or using the command line in R:
+
+``` r
+install.packages(
+  c("devtools", "DT", "digest", "dplyr", "here", "htmltools", 
+    "kableExtra", "parallel", "readr", "rlang", "stringr", "tidyr",
+    "xfun")
+```
+
+#### 3. Update the Configuration File
+
+Edit `config.yml` to suit your project. You’ll see a heading entitled
+`example` - This is a configuration for the example files in the repo.
+You will see another heading entitled `your_study`: modify these entries
+according to your study requirements. `file_name_prefix` and variable
+names such as `participant_id_var`, `cluster_name_var`,
+`cluster_size_var`, `clusters_total`, and `cluster_tx` should be written
+in [snake case](https://en.wikipedia.org/wiki/Snake_case).
+`cluster_name_var` should exactly match the name of the variable in the
+EDC containing the cluster IDs.
+
+#### 4. Create Lists of Clusters to Randomize
+
+The R Markdown files expect the user to supply spreadsheets in [CSV
+format](https://readr.tidyverse.org/reference/read_delim.html) that
+specify the clusters to be randomized, and the maximum number of
+participants anticipated at each cluster. For example, see
+`cluster_list_1.csv` in the repository:
+
+| cluster_name | cluster_n | stratum_1 | stratum_2 |
+|:-------------|----------:|:----------|:----------|
+| cluster_1    |        30 | A         | C         |
+| cluster_2    |        30 | B         | C         |
+| cluster_3    |        30 | A         | C         |
+| cluster_4    |        30 | B         | C         |
+| cluster_5    |        30 | A         | D         |
+| cluster_6    |        30 | B         | D         |
+
+The columns indicate the name of the cluster in the EDC (`cluster_name`)
+and the maximum number of participants expected at this cluster
+(`cluster_n`). The values of `cluster_name` should exactly match the
+values in the EDC. Additionally, two other variables are included:
+`stratum_1` and `stratum_2` are variables to be used in stratified
+randomization.
+
+The configuration file `config.yml` tells the R Markdown code how the
+input files are formatted, how randomization is to be carried out (RNG
+seeds, stratification factors), as well as metadata about the study.
+
+#### 5. Modify the .Rmd Files
+
+Finally, configure the R Markdown files (.Rmd extensions). Change
+`config_name` to the name you used in `config.yml` (defaults to
+`your_study`):
+
+``` r
+config_name <- "your_study"
+```
+
+The user specifies `cluster_list_files`, a vector of file names that
+contain the lists of clusters to be randomized. These files should be in
+comma-separated value (CSV) format.
+
+``` r
+cluster_list_files <-
+  c("cluster_list_1.csv")
+```
+
+If additional batches of clusters are to be randomized later, their file
+names should be added in order from first to last.
+
+``` r
+cluster_list_files <-
+  c("cluster_list_1.csv",
+    "cluster_list_2.csv")
+```
+
+#### 6. Step Through the Code
+
+Go chunk-by-chunk, running code up until the `Save-Results` chunk: built
+in data checks are meant to identify issues, such as missing
+information, duplicate cluster IDs within a list, and so on. Hit the
+`Knit` button to generate a full report.
+
+Note: the code is designed to avoid overwriting files that may contain a
+previously-created randomization list. Once a list is created, be sure
+that treatment assignment is backed up in at least two other places. If
+a list is created for testing, make sure that the file name clearly
+indicates this in both the files (e.g. set
+`file_name_prefix = "TESTING_study`) and the treatment labels generated
+(e.g. `tx_labels` should be `"TESTING_A"` and `"TESTING_B`).
+
+## References
+
+<div id="refs" class="references csl-bib-body hanging-indent"
+entry-spacing="0">
+
+<div id="ref-Campbell2012" class="csl-entry">
+
+Campbell, M. K., G. Piaggio, D. R. Elbourne, and D. G. Altman. 2012.
+“Consort 2010 Statement: Extension to Cluster Randomised Trials.” *BMJ*
+345 (sep04 1): e5661–61. <https://doi.org/10.1136/bmj.e5661>.
+
+</div>
+
+<div id="ref-Dron2021" class="csl-entry">
+
+Dron, Louis, Monica Taljaard, Yin Bun Cheung, Rebecca Grais, Nathan
+Ford, Kristian Thorlund, Fyezah Jehan, et al. 2021. “The Role and
+Challenges of Cluster Randomised Trials for Global Health.” *The Lancet
+Global Health* 9 (5): e701–10.
+<https://doi.org/10.1016/s2214-109x(20)30541-6>.
+
+</div>
+
+<div id="ref-HayesMoulton2017" class="csl-entry">
+
+Hayes, Richard J., and Lawrence H. Moulton. 2017. *Cluster Randomised
+Trials, Second Edition*. United States: CRC Press.
+<https://doi.org/10.4324/9781315370286>.
+
+</div>
+
+<div id="ref-Hemming2023" class="csl-entry">
+
+Hemming, Karla, and Monica Taljaard. 2023. “Key Considerations for
+Designing, Conducting and Analysing a Cluster Randomized Trial.”
+*International Journal of Epidemiology* 52 (5): 1648–58.
+<https://doi.org/10.1093/ije/dyad064>.
+
+</div>
+
+<div id="ref-Hemming2018" class="csl-entry">
+
+Hemming, Karla, Monica Taljaard, Gordon Forbes, Sandra M Eldridge, and
+Charles Weijer. 2018. “Ethical Implications of Excessive Cluster Sizes
+in Cluster Randomised Trials.” *BMJ Quality &Amp; Safety* 27 (8):
+664–70. <https://doi.org/10.1136/bmjqs-2017-007164>.
+
+</div>
+
+<div id="ref-Hemming2017" class="csl-entry">
+
+Hemming, K, S Eldridge, G Forbes, C Weijer, and M Taljaard. 2017. “How
+to Design Efficient Cluster Randomised Trials.” *BMJ*, July, j3064.
+<https://doi.org/10.1136/bmj.j3064>.
+
+</div>
+
+<div id="ref-Kahan2016" class="csl-entry">
+
+Kahan, Brennan C., Gordon Forbes, Yunus Ali, Vipul Jairath, Stephen
+Bremner, Michael O. Harhay, Richard Hooper, Neil Wright, Sandra M.
+Eldridge, and Clémence Leyrat. 2016. “Increased Risk of Type i Errors in
+Cluster Randomised Trials with Small or Medium Numbers of Clusters: A
+Review, Reanalysis, and Simulation Study.” *Trials* 17 (1).
+<https://doi.org/10.1186/s13063-016-1571-2>.
+
+</div>
+
+<div id="ref-Kahan2022" class="csl-entry">
+
+Kahan, Brennan C, Fan Li, Andrew J Copas, and Michael O Harhay. 2022.
+“Estimands in Cluster-Randomized Trials: Choosing Analyses That Answer
+the Right Question.” *International Journal of Epidemiology* 52 (1):
+107–18. <https://doi.org/10.1093/ije/dyac131>.
+
+</div>
+
+<div id="ref-Leyrat2017" class="csl-entry">
+
+Leyrat, Clémence, Katy E Morgan, Baptiste Leurent, and Brennan C Kahan.
+2017. “Cluster Randomized Trials with a Small Number of Clusters: Which
+Analyses Should Be Used?” *International Journal of Epidemiology* 47
+(1): 321–31. <https://doi.org/10.1093/ije/dyx169>.
+
+</div>
+
+<div id="ref-Rutterford2015" class="csl-entry">
+
+Rutterford, Clare, Monica Taljaard, Stephanie Dixon, Andrew Copas, and
+Sandra Eldridge. 2015. “Reporting and Methodological Quality of Sample
+Size Calculations in Cluster Randomized Trials Could Be Improved: A
+Review.” *Journal of Clinical Epidemiology* 68 (6): 716–23.
+<https://doi.org/10.1016/j.jclinepi.2014.10.006>.
+
+</div>
+
+<div id="ref-Wright2015" class="csl-entry">
+
+Wright, Neil, Noah Ivers, Sandra Eldridge, Monica Taljaard, and Stephen
+Bremner. 2015. “A Review of the Use of Covariates in Cluster Randomized
+Trials Uncovers Marked Discrepancies Between Guidance and Practice.”
+*Journal of Clinical Epidemiology* 68 (6): 603–9.
+<https://doi.org/10.1016/j.jclinepi.2014.12.006>.
+
+</div>
+
+</div>
