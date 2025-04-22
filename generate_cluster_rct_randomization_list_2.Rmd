@@ -1075,7 +1075,7 @@ edc_list <-
     delim = "|"
   ) %>%
   dplyr::select(
-    !dplyr::all_of(x = c(cluster_size_var, ".row"))
+    dplyr::all_of(x = c(cluster_id_var, cluster_tx_var))
   )
 
 # Mark assigned strata
